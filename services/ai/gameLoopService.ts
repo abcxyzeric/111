@@ -29,11 +29,27 @@ export const startGame = async (config: WorldConfig): Promise<{ narration: strin
     
     const parsed = parseResponse(rawResponse);
     
-    // MERGE STRATEGY: Tích hợp World News vào Narration
-    // Cập nhật: Đảo ngược thứ tự -> Narration + Separator + World News
+    // --- CLEANUP LOGIC ---
     let finalNarration = parsed.narration;
-    if (parsed.worldSim && parsed.worldSim.trim() !== '' && parsed.worldSim.trim() !== 'EMPTY') {
-        finalNarration = `${parsed.narration}\n\n----------------\n\n[TIN TỨC THẾ GIỚI]\n${parsed.worldSim}`;
+
+    // 1. Regex Clean up: Remove leaked XML blocks and tags if they leaked into narration
+    finalNarration = finalNarration.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+    finalNarration = finalNarration.replace(/<world_sim>[\s\S]*?<\/world_sim>/gi, '');
+    finalNarration = finalNarration.replace(/<\/?thinking>/gi, '');
+    finalNarration = finalNarration.replace(/<\/?world_sim>/gi, '');
+    
+    // 2. Remove specific artifacts mentions by user or explicitly generated headers
+    finalNarration = finalNarration.replace(/\[TIN TỨC THẾ GIỚI\]/gi, '');
+    finalNarration = finalNarration.trim();
+
+    // 3. Append World Sim if valid (MERGE STRATEGY)
+    // Logic: Narration + Separator + World News (Content only, no Header)
+    if (parsed.worldSim) {
+        const simContent = parsed.worldSim.trim();
+        // Check for EMPTY, EMPTY., or just whitespace
+        if (simContent && !/^EMPTY\.?$/i.test(simContent)) {
+            finalNarration = `${finalNarration}\n\n----------------\n\n${simContent}`;
+        }
     }
 
     // Return undefined for worldSim so the UI modal doesn't pop up
@@ -300,11 +316,26 @@ export const getNextTurn = async (gameState: GameState, codeExtractedTime?: Time
     
     const parsed = parseResponse(rawResponse);
 
-    // MERGE STRATEGY: Tích hợp World News vào Narration
-    // Cập nhật: Đảo ngược thứ tự -> Narration + Separator + World News
+    // --- CLEANUP LOGIC ---
     let finalNarration = parsed.narration;
-    if (parsed.worldSim && parsed.worldSim.trim() !== '' && parsed.worldSim.trim() !== 'EMPTY') {
-        finalNarration = `${parsed.narration}\n\n----------------\n\n[TIN TỨC THẾ GIỚI]\n${parsed.worldSim}`;
+
+    // 1. Regex Clean up: Remove leaked XML blocks and tags
+    finalNarration = finalNarration.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+    finalNarration = finalNarration.replace(/<world_sim>[\s\S]*?<\/world_sim>/gi, '');
+    finalNarration = finalNarration.replace(/<\/?thinking>/gi, '');
+    finalNarration = finalNarration.replace(/<\/?world_sim>/gi, '');
+
+    // 2. Remove specific artifacts
+    finalNarration = finalNarration.replace(/\[TIN TỨC THẾ GIỚI\]/gi, '');
+    finalNarration = finalNarration.trim();
+
+    // 3. Append World Sim if valid (MERGE STRATEGY)
+    if (parsed.worldSim) {
+        const simContent = parsed.worldSim.trim();
+        // Check for EMPTY, EMPTY., or just whitespace
+        if (simContent && !/^EMPTY\.?$/i.test(simContent)) {
+            finalNarration = `${finalNarration}\n\n----------------\n\n${simContent}`;
+        }
     }
 
     // Return undefined for worldSim to ensure component doesn't show separate modal

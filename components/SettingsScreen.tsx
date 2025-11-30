@@ -233,6 +233,9 @@ const SettingsScreen: React.FC<SettingsScreenProps> = ({ onBack }) => {
     }
   };
 
+  // Cố định mức tối đa cho Flash, Pro sẽ tự động override trong code logic
+  const maxThinkingBudget = 10000;
+
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6 md:p-8">
       <div className="flex justify-between items-center mb-8">
@@ -358,9 +361,12 @@ const SettingsScreen: React.FC<SettingsScreenProps> = ({ onBack }) => {
               className="w-full bg-slate-900/70 border border-slate-700 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-yellow-500 focus:border-yellow-500 transition"
             >
               <option value="gemini-2.5-flash">Gemini 2.5 Flash (Mặc định - Tốc độ cao, tiết kiệm)</option>
-              <option value="gemini-2.5-pro-preview-02-05">Gemini 2.5 Pro (Tư duy sâu, văn phong tốt hơn)</option>
+              <option value="gemini-2.5-pro">Gemini 2.5 Pro (Tư duy sâu, văn phong tốt hơn)</option>
             </select>
-            <p className="text-xs text-slate-500 mt-1">Chọn model sẽ đóng vai trò Game Master. Model Pro thông minh hơn nhưng chậm hơn Flash.</p>
+            <div className="mt-2 p-3 bg-slate-900/50 border border-slate-700 rounded text-xs text-slate-400 space-y-1">
+                <p><strong>Flash:</strong> Phản hồi cực nhanh, tiết kiệm ngân sách suy nghĩ. Phù hợp cho đa số người chơi.</p>
+                <p><strong>Pro:</strong> Khả năng suy luận sâu sắc, mạch văn chau chuốt hơn, nhưng tốc độ chậm hơn đáng kể.</p>
+            </div>
           </div>
           <div>
             <div className="flex justify-between items-center mb-2">
@@ -390,7 +396,7 @@ const SettingsScreen: React.FC<SettingsScreenProps> = ({ onBack }) => {
           </div>
           <div>
             <div className="flex justify-between items-center mb-2">
-                <label htmlFor="thinking-budget" className="block text-sm font-medium text-slate-300">Thinking Budget</label>
+                <label htmlFor="thinking-budget" className="block text-sm font-medium text-slate-300">Thinking Budget (Dành cho Flash)</label>
                  <input
                   type="number"
                   id="thinking-budget-input"
@@ -398,7 +404,7 @@ const SettingsScreen: React.FC<SettingsScreenProps> = ({ onBack }) => {
                   onChange={(e) => handleAiPerformanceSettingChange('thinkingBudget', e.target.value)}
                   className="w-24 bg-slate-900 border border-slate-600 rounded-md px-2 py-1 text-sm text-center"
                   min="0"
-                  max="10000"
+                  max={maxThinkingBudget}
                   step="100"
                 />
             </div>
@@ -409,10 +415,12 @@ const SettingsScreen: React.FC<SettingsScreenProps> = ({ onBack }) => {
               onChange={(e) => handleAiPerformanceSettingChange('thinkingBudget', e.target.value)}
               className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-yellow-500"
               min="0"
-              max="10000"
+              max={maxThinkingBudget}
               step="100"
             />
-            <p className="text-xs text-slate-500 mt-1">Cung cấp cho AI "ngân sách suy nghĩ" lớn hơn để xử lý các yêu-cầu-phức-tạp, giúp diễn biến linh-hoạt hơn. Mặc định: 1200.</p>
+            <p className="text-xs text-slate-500 mt-1">Cung cấp "ngân sách suy nghĩ" để AI xử lý các yêu cầu phức tạp. Mặc định: 1200.<br/>
+            <span className="text-yellow-500 italic">Lưu ý: Thanh trượt này chỉ áp dụng cho model 2.5 Flash. Khi chọn model Pro, game sẽ tự động kích hoạt chế độ "Siêu Trí Tuệ" (Thinking Budget: 16k) bất kể cài đặt tại đây.</span>
+            </p>
           </div>
           <div>
             <div className="flex justify-between items-center mb-2">
