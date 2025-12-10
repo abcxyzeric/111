@@ -1,0 +1,1324 @@
+
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { GameState, InitialEntity, EncounteredNPC, Companion, GameItem, Quest, EncounteredFaction, EncyclopediaData, VectorUpdate, PendingVectorItem } from '../types';
+import Icon from './common/Icon';
+import Button from './common/Button';
+import Accordion from './common/Accordion'; // Import Accordion
+import * as aiService from '../services/aiService';
+import * as fileService from '../services/fileService';
+import * as embeddingService from '../services/ai/embeddingService'; // Import embedding service
+import NotificationModal from './common/NotificationModal';
+import { CORE_ENTITY_TYPES, ENTITY_TYPE_OPTIONS } from '../constants';
+import { SmartCodexResult } from '../services/ai/smartCodexService';
+import ConfirmationModal from './common/ConfirmationModal';
+
+
+interface EncyclopediaModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  gameState: GameState;
+  setGameState: React.Dispatch<React.SetStateAction<GameState>>;
+  onDeleteEntity: (entity: { name: string }) => void;
+}
+
+type KnowledgeFile = { name: string, content: string };
+type AllEntities = (EncounteredNPC | Companion | GameItem | {name: string, description: string, tags?: string[]} | EncounteredFaction | InitialEntity | Quest | KnowledgeFile);
+
+const isKnowledgeItem = (item: AllEntities): item is KnowledgeFile => 'content' in item && !('description' in item);
+
+const TabButton: React.FC<{ active: boolean; onClick: () => void; children: React.ReactNode; iconName: any; }> = ({ active, onClick, children, iconName }) => (
+    <button
+        onClick={onClick}
+        className={`flex items-center justify-start gap-2 px-3 py-3 text-xs sm:text-sm font-semibold transition-colors duration-200 focus:outline-none w-full text-left rounded-md ${
+            active
+                ? 'text-purple-300 bg-slate-900/50 whitespace-normal' // Active: wrap text
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50 truncate' // Inactive: truncate
+        } md:truncate`}
+    >
+        <Icon name={iconName} className="w-4 h-4 sm:w-5 sm:h-5 flex-shrink-0" />
+        <span>{children}</span>
+    </button>
+);
+
+const fixedTabsConfig = [
+    { key: 'characters', label: 'Nhân Vật & Đồng hành', icon: 'user' },
+    { key: 'items', label: 'Vật phẩm', icon: 'magic' },
+    { key: 'skills', label: 'Kỹ năng', icon: 'magic' },
+    { key: 'factions', label: 'Thế Lực', icon: 'world' },
+    { key: 'locations', label: 'Địa Điểm', icon: 'world' },
+    { key: 'quests', label: 'Nhiệm Vụ', icon: 'quest' },
+    { key: 'concepts', label: 'Hệ thống sức mạnh / Lore', icon: 'news' },
+    { key: 'knowledge', label: 'Kiến thức nền AI', icon: 'rules' },
+];
+
+export const EncyclopediaModal: React.FC<EncyclopediaModalProps> = ({ isOpen, onClose, gameState, setGameState, onDeleteEntity }) => {
+    const [mainView, setMainView] = useState<'browse' | 'analyze' | 'manage'>('browse');
+    const [activeTab, setActiveTab] = useState<string>('characters');
+    const [searchTerm, setSearchTerm] = useState('');
+    const [activeItem, setActiveItem] = useState<AllEntities | null>(null);
+    const [isEditing, setIsEditing] = useState(false);
+    const [editFormData, setEditFormData] = useState<any>(null);
+    const [isAiOptimizing, setIsAiOptimizing] = useState(false);
+    const [notification, setNotification] = useState({ isOpen: false, title: '', messages: [''] });
+    const importFileRef = useRef<HTMLInputElement>(null);
+    const [newCategoryName, setNewCategoryName] = useState('');
+
+    // --- Smart Codex States ---
+    const [codexCommand, setCodexCommand] = useState('');
+    const [isGeneratingCodex, setIsGeneratingCodex] = useState(false);
+    const [codexPreview, setCodexPreview] = useState<SmartCodexResult | null>(null);
+    
+    // --- Confirmation States ---
+    const [confirmation, setConfirmation] = useState<{ 
+        isOpen: boolean, 
+        type: 'delete_category' | 'ai_optimize' | null, 
+        payload: any 
+    }>({ isOpen: false, type: null, payload: null });
+
+    const { processedData, dynamicCategories } = useMemo(() => {
+        if (!isOpen) return { processedData: {}, dynamicCategories: [] };
+        
+        const allEntitiesFromState = (state: GameState): (AllEntities & {type?: string})[] => {
+            const all = [
+                ...(state.encounteredNPCs || []).map(e => ({ ...e, type: 'NPC' })),
+                ...(state.companions || []).map(e => ({ ...e, type: 'NPC' })), // Coi companion là NPC cho mục đích duyệt
+                ...(state.inventory || []).map(e => ({ ...e, type: 'Vật phẩm' })),
+                ...(state.character.skills || []).map(s => ({...s, type: 'Công pháp / Kỹ năng'})),
+                ...(state.encounteredFactions || []).map(e => ({ ...e, type: 'Phe phái/Thế lực' })),
+                ...(state.quests || []),
+                ...(state.discoveredEntities || []),
+                ...(state.worldConfig.initialEntities || [])
+            ];
+             const uniqueByName = <T extends { name: string }>(arr: T[]): T[] => {
+                const seen = new Set<string>();
+                return arr.filter(item => {
+                    if (!item || !item.name) return false;
+                    const lowerName = item.name.toLowerCase();
+                    return seen.has(lowerName) ? false : seen.add(lowerName);
+                });
+            };
+            return uniqueByName(all);
+        };
+
+        const allEntities = allEntitiesFromState(gameState);
+
+        const baseData: Record<string, AllEntities[]> & { knowledge: KnowledgeFile[] } = {
+            characters: allEntities.filter(e => e.type === 'NPC'),
+            items: allEntities.filter(e => e.type === 'Vật phẩm'),
+            skills: allEntities.filter(e => e.type === 'Công pháp / Kỹ năng'),
+            factions: allEntities.filter(e => e.type === 'Phe phái/Thế lực'),
+            locations: allEntities.filter(e => e.type === 'Địa điểm'),
+            quests: allEntities.filter(e => (e as Quest).status),
+            concepts: allEntities.filter(e => !['NPC', 'Vật phẩm', 'Phe phái/Thế lực', 'Địa điểm', 'Công pháp / Kỹ năng'].includes(e.type || '') && !(e as Quest).status),
+            knowledge: gameState.worldConfig.backgroundKnowledge || [],
+        };
+
+        // Kết hợp danh mục tùy chỉnh do người chơi tạo và danh mục từ thực thể
+        const entitiesCategories = [...new Set(allEntities.map(e => (e as any).customCategory).filter(Boolean))];
+        const userCategories = gameState.customCategories || [];
+        const dynamicCats = [...new Set([...entitiesCategories, ...userCategories])].sort();
+
+        const finalData: Record<string, AllEntities[]> = { ...baseData };
+
+        dynamicCats.forEach(cat => {
+            finalData[cat] = allEntities.filter(e => (e as any).customCategory === cat);
+        });
+
+        // Filter out items in fixed tabs that already belong to a dynamic category to avoid duplication?
+        // Decision: Let's remove them from the generic lists if they have a specific category, 
+        // to encourage using the new tabs. EXCEPT 'knowledge' which is special.
+        fixedTabsConfig.forEach(tab => {
+            if (tab.key !== 'knowledge' && finalData[tab.key]) {
+                 finalData[tab.key] = finalData[tab.key].filter(e => !(e as any).customCategory);
+            }
+        });
+        
+        return { processedData: finalData, dynamicCategories: dynamicCats };
+    }, [isOpen, gameState]);
+
+    // Reset state on open/close or tab change
+    useEffect(() => {
+        if (isOpen) {
+            setActiveItem(null);
+            setIsEditing(false);
+            setSearchTerm('');
+            if (mainView !== 'browse') setMainView('browse');
+            setCodexPreview(null);
+            setCodexCommand('');
+        }
+    }, [isOpen]);
+
+    useEffect(() => {
+         setActiveItem(null);
+         setIsEditing(false);
+         setSearchTerm('');
+    }, [activeTab, mainView]);
+
+    const filteredList = useMemo(() => {
+        let list: AllEntities[] = processedData[activeTab] || [];
+        
+        if (activeTab === 'quests') {
+            list = [...list].sort((a, b) => {
+                const statusA = (a as Quest).status === 'hoàn thành' ? 1 : 0;
+                const statusB = (b as Quest).status === 'hoàn thành' ? 1 : 0;
+                return statusA - statusB;
+            });
+        }
+
+        if (!searchTerm) return list;
+        return list.filter(item => item.name.toLowerCase().includes(searchTerm.toLowerCase()));
+    }, [processedData, activeTab, searchTerm]);
+    
+    const handleSelectItem = (item: AllEntities) => {
+        setActiveItem(item);
+        setIsEditing(false);
+    };
+
+    const handleStartEdit = () => {
+        if (!activeItem || isKnowledgeItem(activeItem)) return;
+        setEditFormData({
+            ...activeItem,
+            status: (activeItem as Quest).status || 'đang tiến hành',
+            tags: ((activeItem as any).tags || []).join(', '),
+            type: (activeItem as any).type || 'Hệ thống sức mạnh / Lore' // Default if missing
+        });
+        setIsEditing(true);
+    };
+
+    const handleFormChange = (field: string, value: string) => {
+        setEditFormData((prev: any) => ({ ...prev, [field]: value }));
+    };
+
+    const handleSaveEdit = () => {
+        if (!editFormData || !activeItem) return;
+        
+        // Chuẩn hóa tags từ chuỗi về mảng
+        const updatedData = {
+            ...editFormData,
+            tags: typeof editFormData.tags === 'string' ? editFormData.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : editFormData.tags,
+        };
+        
+        setGameState(prev => {
+            const newState = JSON.parse(JSON.stringify(prev)); // Deep copy state
+            
+            // Map tên danh sách với mảng dữ liệu thực tế trong newState
+            // Lưu ý: Các mảng con phải được khởi tạo nếu chưa có
+            if (!newState.character) newState.character = {};
+            if (!newState.worldConfig) newState.worldConfig = {};
+
+            const listsMap: Record<string, any[]> = {
+                'encounteredNPCs': newState.encounteredNPCs || [],
+                'companions': newState.companions || [],
+                'inventory': newState.inventory || [],
+                'skills': newState.character.skills || [],
+                'encounteredFactions': newState.encounteredFactions || [],
+                'quests': newState.quests || [],
+                'discoveredEntities': newState.discoveredEntities || [],
+                'initialEntities': newState.worldConfig.initialEntities || []
+            };
+
+            // BƯỚC 1: Tìm nguồn (Source List) dựa trên tên cũ (activeItem.name)
+            let sourceListName = '';
+            let sourceIndex = -1;
+
+            for (const [key, list] of Object.entries(listsMap)) {
+                const idx = list.findIndex((item: any) => item.name === activeItem.name);
+                if (idx > -1) {
+                    sourceListName = key;
+                    sourceIndex = idx;
+                    break;
+                }
+            }
+
+            if (sourceListName === '' || sourceIndex === -1) {
+                console.error("Không tìm thấy item gốc để cập nhật.");
+                return newState;
+            }
+
+            // BƯỚC 2: Xác định đích (Target List)
+            // Ưu tiên sử dụng _targetList từ dropdown nếu có
+            let targetListName = updatedData._targetList;
+
+            // Nếu không có _targetList (người dùng không chọn chuyển), giữ nguyên nguồn
+            if (!targetListName) {
+                targetListName = sourceListName;
+            }
+
+            // BƯỚC 3: Thực hiện Di chuyển và Thanh lọc (Sanitization)
+            if (sourceListName === targetListName) {
+                // Cập nhật tại chỗ
+                let item = listsMap[sourceListName][sourceIndex];
+                let newItem = { ...item, ...updatedData };
+                
+                // Vẫn cần thanh lọc nhẹ để đảm bảo sạch sẽ nếu lỡ có rác
+                if (targetListName !== 'quests') delete newItem.status;
+                if (targetListName !== 'inventory') delete newItem.quantity;
+
+                listsMap[sourceListName][sourceIndex] = newItem;
+            } else {
+                // Xóa cũ
+                const [removedItem] = listsMap[sourceListName].splice(sourceIndex, 1);
+                
+                // Chuẩn hóa dữ liệu cho đích (Pre-save Sanitization)
+                let newItem = { ...removedItem, ...updatedData };
+                
+                // --- LOGIC THANH LỌC QUAN TRỌNG ---
+                if (targetListName === 'quests') {
+                    // Đích là Nhiệm vụ:
+                    // - BẮT BUỘC có status
+                    newItem.status = newItem.status || 'đang tiến hành';
+                    // - Xóa rác
+                    delete newItem.quantity;
+                    delete newItem.personality;
+                    delete newItem.thoughtsOnPlayer;
+                } 
+                else if (targetListName === 'inventory') {
+                    // Đích là Vật phẩm:
+                    // - BẮT BUỘC có quantity
+                    newItem.quantity = newItem.quantity || 1;
+                    // - BẮT BUỘC XÓA status (để không hiện bên tab Quest)
+                    delete newItem.status;
+                    delete newItem.personality;
+                    delete newItem.thoughtsOnPlayer;
+                } 
+                else if (targetListName === 'encounteredNPCs' || targetListName === 'companions') {
+                    // Đích là NPC/Đồng hành:
+                    // - BẮT BUỘC XÓA status và quantity
+                    delete newItem.status;
+                    delete newItem.quantity;
+                    // - Đảm bảo các trường NPC
+                    newItem.personality = newItem.personality || 'Chưa rõ';
+                } 
+                else {
+                    // Các đích khác (Lore, Địa điểm, Skills...):
+                    // - Luôn xóa status và quantity để an toàn
+                    delete newItem.status;
+                    delete newItem.quantity;
+                }
+
+                // Thêm mới vào đích
+                listsMap[targetListName].push(newItem);
+            }
+
+            // Gán lại các danh sách vào newState để đảm bảo cập nhật
+            newState.encounteredNPCs = listsMap['encounteredNPCs'];
+            newState.companions = listsMap['companions'];
+            newState.inventory = listsMap['inventory'];
+            newState.character.skills = listsMap['skills'];
+            newState.encounteredFactions = listsMap['encounteredFactions'];
+            newState.quests = listsMap['quests'];
+            newState.discoveredEntities = listsMap['discoveredEntities'];
+            newState.worldConfig.initialEntities = listsMap['initialEntities'];
+
+            return newState;
+        });
+        
+        setActiveItem(updatedData);
+        setIsEditing(false);
+    };
+
+    const handleDelete = () => {
+        if (!activeItem) return;
+        onDeleteEntity({ name: activeItem.name });
+        setActiveItem(null);
+        setIsEditing(false);
+    };
+    
+    const handleExport = () => {
+        const encyclopediaExportData: EncyclopediaData = {
+            encounteredNPCs: gameState.encounteredNPCs,
+            encounteredFactions: gameState.encounteredFactions,
+            discoveredEntities: gameState.discoveredEntities,
+            inventory: gameState.inventory,
+            companions: gameState.companions,
+            quests: gameState.quests,
+            skills: gameState.character.skills,
+            initialEntities: gameState.worldConfig.initialEntities,
+            customCategories: gameState.customCategories
+        };
+        fileService.saveJsonToFile(encyclopediaExportData, 'bach_khoa_toan_thu_full.json');
+    };
+
+    const handleImportClick = () => {
+        importFileRef.current?.click();
+    };
+
+    const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        try {
+            const importedData = await fileService.loadJsonFromFile<Partial<EncyclopediaData>>(file);
+            
+            setGameState(prev => {
+                const mergeAndDeduplicate = <T extends { name: string }>(original: T[] = [], imported: T[] = []): T[] => {
+                    const combined = [...imported, ...original];
+                    const seen = new Set<string>();
+                    return combined.filter(item => {
+                        if (!item.name) return false;
+                        const lowerName = item.name.toLowerCase();
+                        return seen.has(lowerName) ? false : seen.add(lowerName);
+                    });
+                };
+
+                const mergedCustomCategories = Array.from(new Set([...(prev.customCategories || []), ...(importedData.customCategories || [])]));
+
+                return {
+                    ...prev,
+                    encounteredNPCs: mergeAndDeduplicate(prev.encounteredNPCs, importedData.encounteredNPCs),
+                    encounteredFactions: mergeAndDeduplicate(prev.encounteredFactions, importedData.encounteredFactions),
+                    discoveredEntities: mergeAndDeduplicate(prev.discoveredEntities, importedData.discoveredEntities),
+                    inventory: mergeAndDeduplicate(prev.inventory, importedData.inventory),
+                    companions: mergeAndDeduplicate(prev.companions, importedData.companions),
+                    quests: mergeAndDeduplicate(prev.quests, importedData.quests),
+                    character: {
+                        ...prev.character,
+                        skills: mergeAndDeduplicate(prev.character.skills, importedData.skills)
+                    },
+                    worldConfig: {
+                        ...prev.worldConfig,
+                        initialEntities: mergeAndDeduplicate(prev.worldConfig.initialEntities, importedData.initialEntities)
+                    },
+                    customCategories: mergedCustomCategories
+                };
+            });
+            setNotification({ isOpen: true, title: 'Thành công', messages: ['Đã nhập và hợp nhất dữ liệu Bách khoa thành công.'] });
+
+        } catch (e) {
+            const error = e instanceof Error ? e.message : "Lỗi không xác định";
+            setNotification({ isOpen: true, title: 'Lỗi Nhập Dữ Liệu', messages: [error] });
+        }
+        
+        if (event.target) {
+            event.target.value = '';
+        }
+    };
+
+    const handleAddCategory = () => {
+        const categoryName = newCategoryName.trim();
+        if (!categoryName) return;
+        
+        setGameState(prev => {
+            const currentCats = prev.customCategories || [];
+            if (currentCats.includes(categoryName)) return prev;
+            return {
+                ...prev,
+                customCategories: [...currentCats, categoryName].sort()
+            };
+        });
+        setNewCategoryName('');
+    };
+
+    const handleDeleteCategory = (categoryName: string) => {
+        setConfirmation({ isOpen: true, type: 'delete_category', payload: categoryName });
+    };
+
+    const handleAiOptimize = async () => {
+        setConfirmation({ isOpen: true, type: 'ai_optimize', payload: null });
+    };
+    
+    const executeConfirmation = async () => {
+        const { type, payload } = confirmation;
+        setConfirmation({ isOpen: false, type: null, payload: null });
+
+        if (type === 'delete_category') {
+            const categoryName = payload as string;
+            setGameState(prev => {
+                const currentCats = prev.customCategories || [];
+                return {
+                    ...prev,
+                    customCategories: currentCats.filter(c => c !== categoryName)
+                };
+            });
+        } else if (type === 'ai_optimize') {
+            setIsAiOptimizing(true);
+            setNotification({ isOpen: true, title: 'Đang xử lý...', messages: ['Bắt đầu quá trình chuẩn hóa Bách Khoa Toàn Thư...'] });
+        
+            try {
+                // --- PHASE 1: NORMALIZE CATEGORIES ---
+                setNotification({ isOpen: true, title: 'Đang xử lý...', messages: ['Bước 1/2: Đang yêu cầu AI chuẩn hóa danh mục...'] });
+        
+                const allEntitiesForCat = Object.values(processedData).flat() as { name: string, customCategory?: string }[];
+                const normalizationMappings = await aiService.normalizeCategoriesWithAI(allEntitiesForCat);
+        
+                let stateAfterPhase1 = gameState;
+        
+                if (normalizationMappings.length === 0) {
+                    setNotification({ isOpen: true, title: 'Thông báo', messages: ['Bước 1/2: AI không tìm thấy danh mục nào cần chuẩn hóa.', 'Chuyển sang Bước 2...'] });
+                } else {
+                     // Chuyển đổi mảng thành map để dễ dàng tra cứu
+                    const categoryMap = normalizationMappings.reduce((acc, mapping) => {
+                        acc[mapping.oldCategory] = mapping.newCategory;
+                        return acc;
+                    }, {} as Record<string, string>);
+    
+                    // Apply category updates to game state
+                    setGameState(prev => {
+                        const newState = JSON.parse(JSON.stringify(prev));
+        
+                        const applyMap = (list: any[] | undefined) => {
+                            if (!list) return [];
+                            return list.map(item => {
+                                if (item.customCategory && categoryMap[item.customCategory]) {
+                                    item.customCategory = categoryMap[item.customCategory];
+                                }
+                                return item;
+                            });
+                        };
+        
+                        newState.encounteredNPCs = applyMap(newState.encounteredNPCs);
+                        newState.companions = applyMap(newState.companions);
+                        newState.inventory = applyMap(newState.inventory);
+                        newState.quests = applyMap(newState.quests);
+                        newState.encounteredFactions = applyMap(newState.encounteredFactions);
+                        newState.discoveredEntities = applyMap(newState.discoveredEntities);
+                        newState.worldConfig.initialEntities = applyMap(newState.worldConfig.initialEntities);
+                        
+                        stateAfterPhase1 = newState; // Capture the updated state
+                        return newState;
+                    });
+                    setNotification({ isOpen: true, title: 'Thông báo', messages: [`Bước 1/2: Đã chuẩn hóa ${normalizationMappings.length} danh mục.`, 'Chuyển sang Bước 2...'] });
+                }
+                
+                // Brief pause to allow React to process the state update
+                await new Promise(resolve => setTimeout(resolve, 500));
+        
+                // --- PHASE 2: DEDUPLICATE ENTITIES ---
+                setNotification({ isOpen: true, title: 'Đang xử lý...', messages: ['Bước 2/2: Đang gộp các mục trùng lặp... (có thể mất một lúc)'] });
+        
+                const getAllEntitiesFromState = (state: GameState): AllEntities[] => {
+                     const all = [
+                        ...(state.encounteredNPCs || []), ...(state.companions || []), ...(state.inventory || []),
+                        ...(state.character.skills || []), ...(state.encounteredFactions || []), ...(state.quests || []),
+                        ...(state.discoveredEntities || []), ...(state.worldConfig.initialEntities || [])
+                    ];
+                     const uniqueByName = <T extends { name: string }>(arr: T[]): T[] => {
+                        const seen = new Set<string>();
+                        return arr.filter(item => item.name && !seen.has(item.name.toLowerCase()) && seen.add(item.name.toLowerCase()));
+                    };
+                    return uniqueByName(all);
+                }
+        
+                const allCurrentEntities = getAllEntitiesFromState(stateAfterPhase1);
+                const finalDeduplicationMap: Record<string, string> = {};
+                
+                // Group entities by their category (both fixed and custom)
+                const groupedEntities: Record<string, AllEntities[]> = {};
+                for (const entity of allCurrentEntities) {
+                    const category = (entity as any).customCategory || 'Chưa phân loại'; // A default group
+                    if (!groupedEntities[category]) groupedEntities[category] = [];
+                    groupedEntities[category].push(entity);
+                }
+        
+                for (const category in groupedEntities) {
+                    const entitiesToDedupe = groupedEntities[category].map(e => ({ name: e.name, id: e.name }));
+                    if (entitiesToDedupe.length > 1) {
+                        const groupDeduplicationPairs = await aiService.deduplicateEntitiesInCategoryWithAI(entitiesToDedupe);
+                        for (const pair of groupDeduplicationPairs) {
+                            finalDeduplicationMap[pair.idToDelete] = pair.idToKeep;
+                        }
+                    }
+                }
+        
+                if (Object.keys(finalDeduplicationMap).length === 0) {
+                    setNotification({ isOpen: true, title: 'Hoàn Tất', messages: ['Quá trình chuẩn hóa hoàn tất. Không tìm thấy mục nào cần gộp.'] });
+                } else {
+                    // Apply deduplication
+                    setGameState(prev => {
+                        const newState = JSON.parse(JSON.stringify(prev));
+                        const itemsToDelete = new Set(Object.keys(finalDeduplicationMap));
+                        const itemsToKeep = new Map<string, AllEntities>();
+                        const allEntities = getAllEntitiesFromState(newState);
+    
+                        allEntities.forEach(item => {
+                             if (Object.values(finalDeduplicationMap).includes(item.name) || !itemsToDelete.has(item.name)) {
+                                 itemsToKeep.set(item.name, item);
+                             }
+                        });
+    
+                        for (const nameToDelete in finalDeduplicationMap) {
+                            const nameToKeep = finalDeduplicationMap[nameToDelete];
+                            const itemToDelete = allEntities.find(i => i.name === nameToDelete);
+                            const itemToKeep = itemsToKeep.get(nameToKeep);
+        
+                            if (itemToDelete && itemToKeep) {
+                                const descToDelete = (itemToDelete as any).description || '';
+                                const descToKeep = (itemToKeep as any).description || '';
+                                if (descToDelete.length > descToKeep.length) {
+                                    (itemToKeep as any).description = descToDelete;
+                                }
+                                const mergedTags = Array.from(new Set([...((itemToKeep as any).tags || []), ...((itemToDelete as any).tags || [])]));
+                                (itemToKeep as any).tags = mergedTags;
+                                itemsToKeep.set(nameToKeep, itemToKeep);
+                            }
+                        }
+                        
+                        const updateList = (list: AllEntities[] | undefined) => {
+                            if (!list) return [];
+                            let newList = list.filter(item => !itemsToDelete.has(item.name));
+                            newList = newList.map(item => itemsToKeep.get(item.name) || item);
+                            const uniqueMap = new Map();
+                            newList.forEach(item => uniqueMap.set(item.name.toLowerCase(), item));
+                            return Array.from(uniqueMap.values());
+                        };
+        
+                        newState.encounteredNPCs = updateList(newState.encounteredNPCs);
+                        newState.companions = updateList(newState.companions);
+                        newState.inventory = updateList(newState.inventory);
+                        newState.character.skills = updateList(newState.character.skills);
+                        newState.encounteredFactions = updateList(newState.encounteredFactions);
+                        newState.quests = updateList(newState.quests);
+                        newState.discoveredEntities = updateList(newState.discoveredEntities);
+                        newState.worldConfig.initialEntities = updateList(newState.worldConfig.initialEntities);
+        
+                        return newState;
+                    });
+        
+                    setNotification({ isOpen: true, title: 'Hoàn Tất', messages: [`Quá trình chuẩn hóa hoàn tất. Đã gộp ${Object.keys(finalDeduplicationMap).length} mục trùng lặp.`] });
+                }
+        
+            } catch (e) {
+                const error = e instanceof Error ? e.message : "Lỗi không xác định";
+                setNotification({ isOpen: true, title: 'Lỗi Chuẩn Hóa', messages: [`Lỗi khi chuẩn hóa bằng AI: ${error}`] });
+            } finally {
+                setIsAiOptimizing(false);
+            }
+        }
+    };
+
+    // --- Smart Codex Functions ---
+    const handleGenerateCodex = async () => {
+        if (!codexCommand.trim()) return;
+        setIsGeneratingCodex(true);
+        setCodexPreview(null);
+        try {
+            const result = await aiService.createCodexFromCommand(codexCommand);
+            setCodexPreview(result);
+        } catch (e) {
+            setNotification({ isOpen: true, title: 'Lỗi AI', messages: ['Không thể tạo Codex. Vui lòng thử lại.'] });
+        } finally {
+            setIsGeneratingCodex(false);
+        }
+    };
+
+    const handleSaveCodex = () => {
+        if (!codexPreview) return;
+        
+        setGameState(prev => {
+            const newState = JSON.parse(JSON.stringify(prev));
+            const data = codexPreview.data;
+            const owner = codexPreview.ownerContext;
+            const type = codexPreview.type;
+            const operation = codexPreview.operation;
+            const targetName = codexPreview.targetName || data.name;
+
+            // Helper to merge data if "Update" mode
+            const mergeIfUpdate = (list: any[], newItem: any): any[] => {
+                if (operation === 'create') {
+                    return [...list, newItem];
+                }
+                
+                const index = list.findIndex(item => item.name.toLowerCase() === targetName.toLowerCase());
+                if (index > -1) {
+                    // Update Logic: Merge properties
+                    const existing = list[index];
+                    const merged = { ...existing };
+                    
+                    // Only update fields that have content in the new data
+                    if (newItem.description) merged.description = newItem.description;
+                    if (newItem.customCategory) merged.customCategory = newItem.customCategory;
+                    if (newItem.personality) merged.personality = newItem.personality;
+                    if (newItem.quantity && existing.quantity) merged.quantity = newItem.quantity; // Replace or add? Let's replace for now.
+                    if (newItem.details) {
+                        merged.details = { ...existing.details, ...newItem.details };
+                    }
+                    if (newItem.tags) {
+                        merged.tags = Array.from(new Set([...(existing.tags || []), ...(newItem.tags || [])]));
+                    }
+                    
+                    list[index] = merged;
+                    return list;
+                } else {
+                    // If target not found, fallback to create
+                    return [...list, newItem];
+                }
+            };
+
+            // 1. Validator Logic based on Type & Ownership (Client-side)
+            if (type === 'Item') {
+                const newItem = {
+                    name: data.name,
+                    description: data.description,
+                    quantity: data.quantity || 1,
+                    customCategory: data.customCategory || "Trang Bị",
+                    tags: data.tags || [],
+                    details: data.details
+                };
+
+                if (owner.isPlayer) {
+                    // Player owns it -> Inventory
+                    if (!newState.inventory) newState.inventory = [];
+                    newItem.tags.push("player_owned");
+                    newState.inventory = mergeIfUpdate(newState.inventory, newItem);
+
+                } else if (owner.npcName) {
+                    // NPC owns it -> Discovered Entities (Lore) + NPC Tag update
+                    if (!newState.discoveredEntities) newState.discoveredEntities = [];
+                    
+                    const loreItem = {
+                        ...newItem,
+                        type: 'Vật phẩm',
+                        description: `(Sở hữu bởi ${owner.npcName}) ${data.description}`,
+                        customCategory: "Trang Phục NPC", 
+                        tags: [...newItem.tags, `owner:${owner.npcName}`]
+                    };
+                    
+                    newState.discoveredEntities = mergeIfUpdate(newState.discoveredEntities, loreItem);
+
+                    // Update NPC description/tags if NPC exists
+                    const npcIndex = (newState.encounteredNPCs || []).findIndex((n: EncounteredNPC) => n.name.toLowerCase().includes(owner.npcName!.toLowerCase()));
+                    if (npcIndex > -1) {
+                        const npc = newState.encounteredNPCs[npcIndex];
+                        npc.tags = [...(npc.tags || []), `sở hữu:${data.name}`];
+                    }
+                } else {
+                    // No owner -> Discovered Entities
+                    if (!newState.discoveredEntities) newState.discoveredEntities = [];
+                    const entityItem = {
+                        ...newItem,
+                        type: 'Vật phẩm',
+                        customCategory: data.customCategory || "Vật phẩm"
+                    };
+                    newState.discoveredEntities = mergeIfUpdate(newState.discoveredEntities, entityItem);
+                }
+            } else if (type === 'Skill') {
+                const newSkill = {
+                    name: data.name,
+                    description: data.description,
+                    // Skills in character sheet don't strictly follow other entity structures, adapting
+                };
+
+                if (owner.isPlayer) {
+                    if (!newState.character.skills) newState.character.skills = [];
+                    // Custom merge for simple skill objects
+                    if (operation === 'update') {
+                        const idx = newState.character.skills.findIndex((s: any) => s.name.toLowerCase() === targetName.toLowerCase());
+                        if (idx > -1) {
+                            newState.character.skills[idx] = { ...newState.character.skills[idx], ...newSkill };
+                        } else {
+                            newState.character.skills.push(newSkill);
+                        }
+                    } else {
+                        newState.character.skills.push(newSkill);
+                    }
+                } else {
+                    if (!newState.discoveredEntities) newState.discoveredEntities = [];
+                    const skillEntity = {
+                        name: data.name,
+                        type: 'Công pháp / Kỹ năng',
+                        description: data.description,
+                        customCategory: data.customCategory || "Kỹ năng",
+                        tags: data.tags
+                    };
+                    newState.discoveredEntities = mergeIfUpdate(newState.discoveredEntities, skillEntity);
+                }
+            } else if (type === 'Faction') {
+                if (!newState.encounteredFactions) newState.encounteredFactions = [];
+                const newFaction = {
+                    name: data.name,
+                    description: data.description,
+                    tags: data.tags,
+                    customCategory: data.customCategory || "Thế Lực"
+                };
+                newState.encounteredFactions = mergeIfUpdate(newState.encounteredFactions, newFaction);
+
+            } else if (type === 'NPC') {
+                if (!newState.encounteredNPCs) newState.encounteredNPCs = [];
+                const newNPC = {
+                    name: data.name,
+                    description: data.description,
+                    personality: data.personality || 'Chưa rõ',
+                    thoughtsOnPlayer: 'Chưa có', // Default, mergeIfUpdate will preserve existing
+                    customCategory: data.customCategory || "Nhân Vật",
+                    tags: data.tags
+                };
+                newState.encounteredNPCs = mergeIfUpdate(newState.encounteredNPCs, newNPC);
+            }
+
+            // 2. Update Custom Categories List
+            if (data.customCategory) {
+                const currentCats = newState.customCategories || [];
+                if (!currentCats.includes(data.customCategory)) {
+                    newState.customCategories = [...currentCats, data.customCategory].sort();
+                }
+            }
+            // Auto add "Trang Phục NPC" category if needed
+            if (type === 'Item' && owner.npcName) {
+                 const currentCats = newState.customCategories || [];
+                 if (!currentCats.includes("Trang Phục NPC")) {
+                    newState.customCategories = [...currentCats, "Trang Phục NPC"].sort();
+                }
+            }
+
+            // 3. Piggyback Buffer Vectorization (Zero-Waste Strategy)
+            // Thay vì gọi embeddingService.createEntityVector ngay lập tức, ta đẩy vào hàng đợi
+            const vectorContent = `${type}: ${data.name}\nMô tả: ${data.description}\nPhân loại: ${data.customCategory || (type==='Item' && owner.npcName ? 'Trang Phục NPC' : 'Chưa rõ')}`;
+            
+            const pendingItem: PendingVectorItem = {
+                id: data.name,
+                type: type,
+                content: vectorContent
+            };
+
+            if (!newState.pendingVectorBuffer) newState.pendingVectorBuffer = [];
+            newState.pendingVectorBuffer.push(pendingItem);
+
+            return newState;
+        });
+
+        setCodexPreview(null);
+        setCodexCommand('');
+        setNotification({ isOpen: true, title: 'Thành công', messages: ['Đã thực thi Codex. Đang chờ đồng bộ vào trí nhớ trong lượt chơi tiếp theo...'] });
+    };
+
+    const MainViewTab: React.FC<{ view: 'browse' | 'analyze' | 'manage', label: string, icon: any }> = ({ view, label, icon }) => {
+        const isActive = mainView === view;
+        return (
+            <button
+                onClick={() => setMainView(view)}
+                className={`px-4 py-2 flex items-center gap-2 rounded-t-md border-b-2 font-semibold transition-all ${
+                    isActive
+                        ? 'bg-slate-800 border-pink-500 text-pink-400'
+                        : 'bg-transparent border-transparent text-slate-400 hover:bg-slate-700/50 hover:text-slate-200'
+                }`}
+            >
+                <Icon name={icon} className="w-5 h-5" />
+                {label}
+            </button>
+        );
+    };
+
+    const analysisStats = useMemo(() => {
+        if (mainView !== 'analyze') return null;
+
+        // FIX: Cast the result of flatMap to AllEntities[] to avoid 'unknown[]' type error
+        const allItems: AllEntities[] = Object.entries(processedData)
+            .filter(([key]) => key !== 'knowledge')
+            .flatMap(([, value]) => value) as AllEntities[];
+
+        const totalItems = allItems.length;
+
+        const totalDescLength = allItems.reduce((acc, item) => {
+            const desc = isKnowledgeItem(item) ? item.content : (item as any).description;
+            return acc + (desc ? desc.length : 0);
+        }, 0);
+        const avgDescLength = totalItems > 0 ? Math.round(totalDescLength / totalItems) : 0;
+        
+        const allTags = allItems.flatMap(item => (item as any).tags || []);
+        const tagCounts: Record<string, number> = allTags.reduce((acc: Record<string, number>, tag) => {
+            acc[tag] = (acc[tag] || 0) + 1;
+            return acc;
+        }, {});
+        
+        const popularTags = Object.entries(tagCounts)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, 5)
+            .map(([tag, count]) => `${tag} (${count})`)
+            .join(', ');
+
+        return { totalItems, avgDescLength, popularTags };
+    }, [mainView, processedData]);
+
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+            <ConfirmationModal 
+                isOpen={confirmation.isOpen}
+                onClose={() => setConfirmation({ isOpen: false, type: null, payload: null })}
+                onConfirm={executeConfirmation}
+                title={confirmation.type === 'delete_category' ? 'Xóa Danh Mục' : 'Chuẩn Hóa Thông Minh'}
+                message={confirmation.type === 'delete_category' 
+                    ? `Bạn có chắc chắn muốn xóa danh mục "${confirmation.payload}" không? Các thực thể trong danh mục này sẽ không bị xóa mà chỉ mất đi nhãn phân loại.` 
+                    : "Hành động này sẽ thực hiện 2 bước:\n1. Chuẩn hóa các danh mục tùy chỉnh.\n2. Gộp các mục bị trùng lặp trong từng danh mục.\nQuá trình sẽ sử dụng AI và cập nhật dữ liệu Bách khoa. Bạn có muốn tiếp tục?"}
+                confirmLabel={confirmation.type === 'delete_category' ? 'Xóa' : 'Bắt đầu'}
+                variant={confirmation.type === 'delete_category' ? 'danger' : 'info'}
+            />
+            <NotificationModal
+                isOpen={notification.isOpen}
+                onClose={() => setNotification(prev => ({ ...prev, isOpen: false }))}
+                title={notification.title}
+                messages={notification.messages}
+            />
+            <input type="file" ref={importFileRef} onChange={handleImport} className="hidden" accept=".json" />
+            
+            {/* Category Suggestions Datalist */}
+            <datalist id="category-suggestions">
+                {dynamicCategories.map((cat, index) => (
+                    <option key={index} value={cat} />
+                ))}
+            </datalist>
+
+            <div 
+                className="bg-slate-800 border border-slate-700 rounded-lg shadow-2xl w-full max-w-6xl relative animate-fade-in-up flex flex-col"
+                style={{ height: '90vh' }}
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="flex justify-between items-center p-4 border-b border-slate-700 flex-shrink-0">
+                    <h2 className="text-xl font-bold text-purple-400 flex items-center">
+                        <Icon name="encyclopedia" className="w-6 h-6 mr-3" />
+                        Bách Khoa Toàn Thư
+                    </h2>
+                     <div className="flex items-center gap-4">
+                        <button onClick={onClose} className="text-slate-400 hover:text-white transition">
+                            <Icon name="xCircle" className="w-7 h-7" />
+                        </button>
+                    </div>
+                </div>
+
+                <div className="flex px-4 pt-2 border-b border-slate-700 flex-shrink-0">
+                    <MainViewTab view="browse" label="Duyệt" icon="news" />
+                    <MainViewTab view="analyze" label="Phân Tích" icon="magic" />
+                    <MainViewTab view="manage" label="Quản Lý" icon="settings" />
+                </div>
+                
+                {mainView === 'browse' && (
+                    <div className="flex-grow flex overflow-hidden">
+                        {/* Left Pane: Navigation */}
+                        <div className="w-1/4 xl:w-1/5 bg-slate-800/50 p-3 flex-shrink-0 flex flex-col">
+                            <h3 className="text-lg font-semibold text-slate-300 mb-3 px-1">Mục lục</h3>
+                            <div className="flex-grow overflow-y-auto pr-2">
+                                <div className="space-y-2">
+                                    {fixedTabsConfig.map(tab => (
+                                        (processedData[tab.key] && processedData[tab.key].length > 0) &&
+                                        <TabButton key={tab.key} active={activeTab === tab.key} onClick={() => setActiveTab(tab.key)} iconName={tab.icon}>{tab.label}</TabButton>
+                                    ))}
+                                    {dynamicCategories.length > 0 && <hr className="border-slate-700 my-3" />}
+                                    {dynamicCategories.map(cat => (
+                                        <TabButton key={cat} active={activeTab === cat} onClick={() => setActiveTab(cat)} iconName="hub">{cat}</TabButton>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                        {/* Middle Pane: List */}
+                        <div className="w-1/3 xl:w-1/4 border-l border-r border-slate-700 flex flex-col">
+                            <div className="p-3 border-b border-slate-700 flex-shrink-0">
+                                <input 
+                                    type="text"
+                                    placeholder="Tìm kiếm trong mục..."
+                                    value={searchTerm}
+                                    onChange={e => setSearchTerm(e.target.value)}
+                                    className="w-full bg-slate-900/70 border border-slate-600 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition placeholder:text-slate-500"
+                                />
+                            </div>
+                            <div className="flex-grow overflow-y-auto">
+                                {filteredList.length > 0 ? (
+                                    <ul className="p-2">
+                                        {filteredList.map((item, index) => (
+                                            <li key={index}>
+                                                <button onClick={() => handleSelectItem(item)} className={`w-full text-left p-2 rounded-md transition-colors ${activeItem?.name === item.name ? 'bg-purple-600/30' : 'hover:bg-slate-700/50'}`}>
+                                                    <div className="flex justify-between items-center">
+                                                        <p className={`font-semibold truncate ${(item as Quest)?.status === 'hoàn thành' ? 'text-slate-500 line-through' : 'text-slate-100'}`}>
+                                                            {item.name}
+                                                        </p>
+                                                        {activeTab === 'quests' && (item as Quest).status && (
+                                                            <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
+                                                                (item as Quest).status === 'hoàn thành' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
+                                                            }`}>
+                                                                {(item as Quest).status === 'hoàn thành' ? 'Hoàn thành' : 'Đang làm'}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    {'quantity' in item && typeof item.quantity === 'number' && <p className="text-xs text-slate-400">Số lượng: {item.quantity}</p>}
+                                                </button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : (
+                                    <p className="text-slate-500 text-center p-4">Không có mục nào.</p>
+                                )}
+                            </div>
+                        </div>
+                        {/* Right Pane: Details */}
+                        <div className="flex-grow p-6 overflow-y-auto">
+                            {activeItem && !isEditing ? (
+                                <div>
+                                    <div className="flex justify-between items-start">
+                                        <h3 className="text-2xl font-bold text-purple-300 mb-2">{activeItem.name}</h3>
+                                        {activeTab !== 'knowledge' && (
+                                            <div className="flex gap-2">
+                                                <Button onClick={handleStartEdit} variant="secondary" className="!w-auto !py-1 !px-3 !text-sm"><Icon name="pencil" className="w-4 h-4 mr-1"/>Chỉnh sửa / Di chuyển</Button>
+                                                <Button onClick={handleDelete} variant="warning" className="!w-auto !py-1 !px-3 !text-sm"><Icon name="trash" className="w-4 h-4 mr-1"/>Xóa</Button>
+                                            </div>
+                                        )}
+                                    </div>
+                                    
+                                    {('type' in activeItem && activeItem.type) && <p className="text-sm text-slate-400 mb-2">Loại: {activeItem.type}</p>}
+                                    {('customCategory' in activeItem && (activeItem as any).customCategory) && <p className="text-sm text-sky-400 mb-2">Phân loại: {(activeItem as any).customCategory}</p>}
+                                    
+                                    {activeTab === 'quests' && (activeItem as Quest).status && (
+                                        <span className={`text-sm font-semibold px-3 py-1 rounded-full mb-4 inline-block ${
+                                            (activeItem as Quest).status === 'hoàn thành' ? 'bg-green-500/20 text-green-300' : 'bg-yellow-500/20 text-yellow-300'
+                                        }`}>
+                                            {(activeItem as Quest).status === 'hoàn thành' ? 'Đã Hoàn Thành' : 'Đang Tiến Hành'}
+                                        </span>
+                                    )}
+
+                                    <div className="mb-4">
+                                        <p className="text-slate-300 whitespace-pre-wrap leading-relaxed">
+                                            {isKnowledgeItem(activeItem) ? activeItem.content : (activeItem as any).description || 'Chưa có mô tả.'}
+                                        </p>
+                                    </div>
+                                    {'personality' in activeItem && activeItem.personality && (
+                                        <div className="mb-4">
+                                            <strong className="text-slate-400 block mb-1">Tính cách:</strong>
+                                            <p className="text-slate-300 italic">"{activeItem.personality}"</p>
+                                        </div>
+                                    )}
+                                    {'thoughtsOnPlayer' in activeItem && activeItem.thoughtsOnPlayer && (
+                                        <div className="mb-4">
+                                            <strong className="text-slate-400 block mb-1">Suy nghĩ về người chơi:</strong>
+                                            <p className="text-amber-300 italic">"{activeItem.thoughtsOnPlayer}"</p>
+                                        </div>
+                                    )}
+
+                                    {('tags' in activeItem && activeItem.tags) && (() => {
+                                        const tagsSource = (activeItem as any).tags;
+                                        let tagsToDisplay: string[] = [];
+                                        if (Array.isArray(tagsSource)) {
+                                            tagsToDisplay = tagsSource;
+                                        } else if (typeof tagsSource === 'string') {
+                                            tagsToDisplay = tagsSource.split(',').map((t: string) => t.trim()).filter(Boolean);
+                                        }
+                                        
+                                        if (tagsToDisplay.length === 0) return null;
+
+                                        return (
+                                            <div className="mt-4">
+                                                <strong className="text-slate-400 block mb-2">Tags:</strong>
+                                                <div className="flex flex-wrap gap-2">
+                                                    {tagsToDisplay.map((tag, i) => (
+                                                        <span key={i} className="bg-slate-700 text-slate-300 text-xs font-medium px-2.5 py-1 rounded-full">{tag}</span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                            ) : activeItem && isEditing ? (
+                                <div>
+                                    <h3 className="text-2xl font-bold text-purple-300 mb-4">Chỉnh sửa: {activeItem.name}</h3>
+                                    <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+                                        <div>
+                                            <label className="block text-sm font-medium text-slate-300 mb-1">Tên</label>
+                                            <input type="text" value={editFormData.name} onChange={e => handleFormChange('name', e.target.value)} className="w-full bg-slate-900 border border-slate-600 rounded-md p-2" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-slate-300 mb-1">Mô tả</label>
+                                            <textarea value={editFormData.description} onChange={e => handleFormChange('description', e.target.value)} rows={5} className="w-full bg-slate-900 border border-slate-600 rounded-md p-2 resize-y" />
+                                        </div>
+                                        {'personality' in editFormData && <div>
+                                            <label className="block text-sm font-medium text-slate-300 mb-1">Tính cách</label>
+                                            <input type="text" value={editFormData.personality} onChange={e => handleFormChange('personality', e.target.value)} className="w-full bg-slate-900 border border-slate-600 rounded-md p-2" />
+                                        </div>}
+                                        {activeTab === 'quests' && 'status' in editFormData && (
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-300 mb-1">Trạng thái</label>
+                                                <select value={editFormData.status} onChange={e => handleFormChange('status', e.target.value)} className="w-full bg-slate-900 border border-slate-600 rounded-md p-2">
+                                                    <option value="đang tiến hành">Đang tiến hành</option>
+                                                    <option value="hoàn thành">Hoàn thành</option>
+                                                </select>
+                                            </div>
+                                        )}
+                                        {'tags' in editFormData && <div>
+                                            <label className="block text-sm font-medium text-slate-300 mb-1">Tags (phân cách bởi dấu phẩy)</label>
+                                            <input type="text" value={editFormData.tags} onChange={e => handleFormChange('tags', e.target.value)} className="w-full bg-slate-900 border border-slate-600 rounded-md p-2" />
+                                        </div>}
+                                        
+                                        <div className="border-t border-slate-700 pt-4 mt-4">
+                                            <h4 className="text-sm font-bold text-yellow-300 mb-3">Di Chuyển & Phân Loại</h4>
+                                            
+                                            <div className="mb-4">
+                                                <label className="block text-sm font-medium text-slate-300 mb-1">Chuyển nhanh vào Tab:</label>
+                                                <select
+                                                    className="w-full bg-slate-900 border border-slate-600 rounded-md p-2 text-slate-200"
+                                                    onChange={(e) => {
+                                                        const targetList = e.target.value;
+                                                        if (!targetList) return;
+                                                        
+                                                        // Cập nhật _targetList để handleSaveEdit sử dụng làm đích đến
+                                                        handleFormChange('_targetList', targetList);
+
+                                                        // Logic cập nhật UI hiển thị loại (Type) tương ứng với đích đến
+                                                        if (targetList === 'encounteredNPCs') {
+                                                            handleFormChange('type', 'NPC');
+                                                            handleFormChange('customCategory', '');
+                                                        } else if (targetList === 'companions') {
+                                                            handleFormChange('type', 'NPC'); // Companion về bản chất là NPC
+                                                            handleFormChange('customCategory', '');
+                                                        } else if (targetList === 'inventory') {
+                                                            handleFormChange('type', 'Vật phẩm');
+                                                            handleFormChange('customCategory', '');
+                                                        } else if (targetList === 'quests') {
+                                                            handleFormChange('type', 'Nhiệm vụ'); // Type giả lập cho UI
+                                                            handleFormChange('status', 'đang tiến hành'); // Set default status
+                                                            handleFormChange('customCategory', '');
+                                                        } else if (targetList === 'encounteredFactions') {
+                                                            handleFormChange('type', 'Phe phái/Thế lực');
+                                                            handleFormChange('customCategory', '');
+                                                        } else if (targetList === 'discoveredEntities') {
+                                                            // Mặc định cho Lore/Địa điểm/Danh mục động
+                                                            // Không đổi type nếu đang ở danh mục động, chỉ clear customCategory nếu chọn mục chung
+                                                            handleFormChange('customCategory', '');
+                                                        } else {
+                                                            // Đây là danh mục động (custom category)
+                                                            // Gán customCategory = tên danh mục
+                                                            handleFormChange('customCategory', targetList);
+                                                            // Target list thực tế sẽ là discoveredEntities (nơi chứa các custom entity)
+                                                            handleFormChange('_targetList', 'discoveredEntities');
+                                                        }
+                                                    }}
+                                                    value=""
+                                                >
+                                                    <option value="">-- Chọn đích đến --</option>
+                                                    <optgroup label="Danh sách Chính">
+                                                        <option value="encounteredNPCs">Nhân vật (NPC)</option>
+                                                        <option value="companions">Đồng hành</option>
+                                                        <option value="inventory">Vật phẩm</option>
+                                                        <option value="quests">Nhiệm vụ</option>
+                                                        <option value="encounteredFactions">Thế lực</option>
+                                                        <option value="discoveredEntities">Lore / Địa điểm</option>
+                                                    </optgroup>
+                                                    <optgroup label="Danh mục Động (AI tạo)">
+                                                        {dynamicCategories.map(cat => (
+                                                            <option key={cat} value={cat}>{cat}</option>
+                                                        ))}
+                                                    </optgroup>
+                                                </select>
+                                                <p className="text-xs text-slate-500 mt-1">Chọn tab đích để di chuyển thực thể. Dữ liệu sẽ tự động được chuẩn hóa (thêm/bớt thuộc tính) cho phù hợp.</p>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                {'type' in editFormData && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-slate-300 mb-1">Loại Thực Thể (Gốc)</label>
+                                                        <select 
+                                                            value={editFormData.type} 
+                                                            onChange={e => handleFormChange('type', e.target.value)} 
+                                                            className="w-full bg-slate-900 border border-slate-600 rounded-md p-2"
+                                                        >
+                                                            {CORE_ENTITY_TYPES.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                                        </select>
+                                                    </div>
+                                                )}
+                                                
+                                                {'customCategory' in editFormData && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-slate-300 mb-1">Tên Tab Động (Tùy chỉnh)</label>
+                                                        <input 
+                                                            type="text" 
+                                                            list="category-suggestions"
+                                                            value={editFormData.customCategory || ''} 
+                                                            onChange={e => handleFormChange('customCategory', e.target.value)} 
+                                                            className="w-full bg-slate-900 border border-slate-600 rounded-md p-2" 
+                                                            placeholder="Nhập tên mới..."
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-4 mt-6">
+                                        <Button onClick={handleSaveEdit} variant="primary" className="!w-auto !py-2 !px-4 !text-sm">Lưu Thay Đổi</Button>
+                                        <Button onClick={() => setIsEditing(false)} variant="secondary" className="!w-auto !py-2 !px-4 !text-sm">Hủy</Button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex flex-col items-center justify-center h-full text-slate-500">
+                                    <Icon name="encyclopedia" className="w-16 h-16 mb-4" />
+                                    <p className="text-lg">Chọn một mục để xem chi tiết</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+                 {mainView === 'analyze' && analysisStats && (
+                    <div className="flex-grow p-6 overflow-y-auto">
+                        <h2 className="text-xl font-bold text-pink-400 mb-6 flex items-center gap-2"><Icon name="magic" className="w-6 h-6"/>Phân Tích Bách Khoa</h2>
+                        <div className="space-y-6">
+                            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                <div className="bg-slate-900/50 p-4 rounded-lg text-center">
+                                    <p className="text-sm text-slate-400 mb-1">Tổng mục</p>
+                                    <p className="text-3xl font-bold text-blue-400">{analysisStats.totalItems}</p>
+                                </div>
+                                <div className="bg-slate-900/50 p-4 rounded-lg text-center">
+                                    <p className="text-sm text-slate-400 mb-1">Mục mới</p>
+                                    <p className="text-3xl font-bold text-green-400">0</p>
+                                </div>
+                                <div className="bg-slate-900/50 p-4 rounded-lg text-center">
+                                    <p className="text-sm text-slate-400 mb-1">Độ dài TB</p>
+                                    <p className="text-3xl font-bold text-purple-400">{analysisStats.avgDescLength}</p>
+                                </div>
+                                <div className="bg-slate-900/50 p-4 rounded-lg text-center">
+                                    <p className="text-sm text-slate-400 mb-1">Tag phổ biến</p>
+                                    <p className="text-xs font-semibold text-orange-400 truncate pt-2">{analysisStats.popularTags || 'Không có'}</p>
+                                </div>
+                            </div>
+
+                            <div className="bg-slate-900/50 p-6 rounded-lg border border-slate-700">
+                                <h3 className="text-lg font-semibold text-slate-200 mb-4 flex items-center gap-2">
+                                    <Icon name="info" className="w-5 h-5"/>
+                                    Thống Kê Chi Tiết
+                                </h3>
+                                <ul className="space-y-3 text-slate-300 text-sm">
+                                    <li className="flex justify-between"><span>Tổng số mục Bách Khoa:</span> <span className="font-semibold">{analysisStats.totalItems}</span></li>
+                                    <li className="flex justify-between"><span>Mục mới (chưa xem):</span> <span className="font-semibold">0</span></li>
+                                    <li className="flex justify-between"><span>Độ dài mô tả trung bình:</span> <span className="font-semibold">{analysisStats.avgDescLength} ký tự</span></li>
+                                    <li><span>Tag hàng đầu:</span> <span className="font-semibold text-orange-300">{analysisStats.popularTags || 'Không có'}</span></li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                {mainView === 'manage' && (
+                     <div className="flex-grow p-6 overflow-y-auto">
+                        <h2 className="text-xl font-bold text-orange-400 mb-4 flex items-center gap-2"><Icon name="settings" className="w-6 h-6"/>Quản Lý Bách Khoa</h2>
+                        
+                        {/* Custom Category Management */}
+                        <div className="bg-slate-900/50 p-4 rounded-lg mb-6 border border-slate-700">
+                            <h3 className="text-lg font-semibold text-slate-300 mb-3 flex items-center gap-2"><Icon name="expand" className="w-5 h-5"/>Quản lý Danh mục Tùy chỉnh</h3>
+                            <p className="text-sm text-slate-400 mb-4">Tạo các danh mục riêng (VD: "Cảnh Giới", "Pháp Bảo"). AI sẽ tự động ưu tiên phân loại thực thể mới vào các nhóm này.</p>
+                            
+                            <div className="flex gap-2 mb-4">
+                                <input 
+                                    type="text" 
+                                    value={newCategoryName}
+                                    onChange={(e) => setNewCategoryName(e.target.value)}
+                                    placeholder="Nhập tên danh mục mới..."
+                                    className="flex-grow bg-slate-800 border border-slate-600 rounded-md px-3 py-2 text-slate-200"
+                                />
+                                <Button onClick={handleAddCategory} variant="info" className="!w-auto !py-2 !px-4 !text-sm"><Icon name="plus" className="w-4 h-4 mr-1"/>Thêm</Button>
+                            </div>
+
+                            {gameState.customCategories && gameState.customCategories.length > 0 ? (
+                                <div className="flex flex-wrap gap-2">
+                                    {gameState.customCategories.map((cat, idx) => (
+                                        <div key={idx} className="bg-slate-800 text-slate-200 text-sm px-3 py-1.5 rounded-full flex items-center gap-2 border border-slate-600">
+                                            <span>{cat}</span>
+                                            <button onClick={() => handleDeleteCategory(cat)} className="text-slate-400 hover:text-red-400"><Icon name="xCircle" className="w-4 h-4"/></button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-sm text-slate-500 italic">Chưa có danh mục tùy chỉnh nào.</p>
+                            )}
+                        </div>
+
+                        {/* --- SMART CODEX ARCHITECT SECTION --- */}
+                        <div className="mb-6 bg-slate-900/50 p-4 rounded-lg border border-fuchsia-500">
+                            <div className="flex items-center justify-between mb-2">
+                                <h3 className="text-lg font-bold text-fuchsia-400 flex items-center">
+                                    <Icon name="magic" className="w-5 h-5 mr-2" />
+                                    Gán / Thực Thi Codex
+                                </h3>
+                            </div>
+                            <div className="p-2 space-y-4">
+                                <div className="text-sm text-slate-300 bg-slate-800 p-3 rounded-md mb-2">
+                                    <p className="font-semibold mb-1 text-fuchsia-300">Hướng dẫn sử dụng:</p>
+                                    <ul className="list-disc list-inside space-y-1 text-slate-400">
+                                        <li><strong>Chức năng:</strong> Dùng để TẠO MỚI thực thể hoặc CẬP NHẬT/GÁN thông tin cho thực thể đã có.</li>
+                                        <li><strong>Gán chủ sở hữu:</strong> Dùng "cho tôi", "của tôi" (Vào túi đồ) hoặc "cho [Tên NPC]" (Vào hồ sơ NPC).</li>
+                                        <li><strong>Ví dụ cụ thể:</strong>
+                                            <ul className="list-[square] list-inside ml-4 mt-1 italic text-slate-500">
+                                                <li>"Tạo một thanh Huyết Long Kiếm cấp Thần Thoại cho tôi." (Tạo mới)</li>
+                                                <li>"Sửa mô tả của Huyết Long Kiếm thành kiếm đã gỉ sét." (Cập nhật)</li>
+                                                <li>"Thêm hiệu ứng Băng giá cho kỹ năng Hỏa Cầu Thuật." (Cập nhật)</li>
+                                            </ul>
+                                        </li>
+                                    </ul>
+                                </div>
+                                <div>
+                                    <textarea
+                                        value={codexCommand}
+                                        onChange={(e) => setCodexCommand(e.target.value)}
+                                        placeholder="Ví dụ: Cập nhật chỉ số cho áo giáp sắt của tôi thành +50 phòng thủ..."
+                                        className="w-full bg-slate-900/70 border border-slate-600 rounded-md px-3 py-2 text-slate-200 focus:ring-2 focus:ring-fuchsia-500 focus:border-fuchsia-500 transition resize-y min-h-[80px]"
+                                    />
+                                </div>
+                                <div className="flex justify-end">
+                                    <Button onClick={handleGenerateCodex} disabled={isGeneratingCodex || !codexCommand.trim()} variant="special" className="!w-auto !py-2 !px-4 !text-sm">
+                                        {isGeneratingCodex ? 'Đang Phân Tích...' : 'Thực Thi Lệnh'}
+                                    </Button>
+                                </div>
+
+                                {/* Preview Area */}
+                                {codexPreview && (
+                                    <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 animate-fade-in mt-4">
+                                        <h4 className="text-sm font-bold text-green-400 mb-2">Xem Trước & Xác Nhận</h4>
+                                        <div className="space-y-2 text-sm mb-4">
+                                            <p><strong className="text-slate-400">Hành động:</strong> <span className={codexPreview.operation === 'update' ? "text-yellow-400 font-bold" : "text-green-400 font-bold"}>{codexPreview.operation === 'update' ? `CẬP NHẬT (${codexPreview.targetName})` : 'TẠO MỚI'}</span></p>
+                                            <p><strong className="text-slate-400">Tên Mới:</strong> <span className="text-slate-200">{codexPreview.data.name}</span></p>
+                                            <p><strong className="text-slate-400">Loại:</strong> <span className="text-slate-200">{codexPreview.type}</span></p>
+                                            <p><strong className="text-slate-400">Phân loại:</strong> <span className="text-slate-200">{codexPreview.data.customCategory}</span></p>
+                                            <p><strong className="text-slate-400">Sở hữu:</strong> <span className="text-slate-200">{codexPreview.ownerContext.isPlayer ? 'Người Chơi' : (codexPreview.ownerContext.npcName || 'Chưa rõ')}</span></p>
+                                            <div className="bg-slate-800 p-2 rounded">
+                                                <p className="text-slate-300 italic">"{codexPreview.data.description}"</p>
+                                            </div>
+                                            {codexPreview.data.details && (
+                                                <div className="text-xs text-slate-400 mt-2 p-2 bg-slate-900 rounded">
+                                                    {codexPreview.data.details.stats && <p>Chỉ số: {codexPreview.data.details.stats}</p>}
+                                                    {codexPreview.data.details.effects && <p>Hiệu ứng: {codexPreview.data.details.effects}</p>}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex justify-end gap-3">
+                                            <button onClick={() => setCodexPreview(null)} className="text-slate-400 hover:text-white px-3 py-1">Hủy</button>
+                                            <Button onClick={handleSaveCodex} variant="success" className="!w-auto !py-1 !px-4 !text-sm">
+                                                {codexPreview.operation === 'update' ? 'Cập Nhật Dữ Liệu' : 'Lưu vào Bách Khoa'}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="bg-slate-900/50 p-4 rounded-lg mb-6 border border-slate-700">
+                            <h3 className="text-lg font-semibold text-slate-300 mb-3 flex items-center gap-2"><Icon name="download" className="w-5 h-5"/>Nhập / Xuất Dữ liệu Đầy đủ</h3>
+                            <p className="text-sm text-slate-400 mb-4">Lưu trữ toàn bộ dữ liệu Bách khoa (bao gồm cả thực thể ban đầu, danh mục, v.v.) ra tệp .json hoặc nhập lại.</p>
+                            <div className="flex gap-4">
+                                <Button onClick={handleExport} variant="secondary" className="!w-auto !py-2 !px-4 !text-sm"><Icon name="download" className="w-4 h-4 mr-2"/>Xuất Toàn Bộ</Button>
+                                <Button onClick={handleImportClick} variant="secondary" className="!w-auto !py-2 !px-4 !text-sm"><Icon name="upload" className="w-4 h-4 mr-2"/>Nhập Toàn Bộ</Button>
+                            </div>
+                        </div>
+                        
+                        <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700">
+                            <h3 className="text-lg font-semibold text-slate-300 mb-3 flex items-center gap-2"><Icon name="magic" className="w-5 h-5"/>Chuẩn Hóa Thông Minh</h3>
+                             <p className="text-sm text-slate-400 mb-4">Yêu cầu AI phân tích và gộp các "Phân loại tùy chỉnh" lộn xộn thành các danh mục lớn, có tổ chức hơn, sau đó gộp các thực thể trùng lặp trong từng danh mục.</p>
+                            <Button onClick={handleAiOptimize} disabled={isAiOptimizing} variant="special" className="!w-auto !py-2 !px-4 !text-sm">
+                                {isAiOptimizing ? 'Đang Chuẩn Hóa...' : <><Icon name="magic" className="w-4 h-4 mr-2"/>Bắt đầu Chuẩn Hóa</>}
+                            </Button>
+                             {isAiOptimizing && <p className="text-sm text-slate-400 mt-2 animate-pulse">AI đang xử lý, quá trình này có thể mất một lúc...</p>}
+                        </div>
+                    </div>
+                )}
+            </div>
+            <style>{`
+            @keyframes fade-in-up {
+                from { opacity: 0; transform: translateY(20px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .animate-fade-in-up {
+                animation: fade-in-up 0.3s ease-out forwards;
+            }
+            .animate-fade-in {
+                animation: fadeIn 0.5s ease-in-out;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+            `}</style>
+        </div>
+    );
+};
