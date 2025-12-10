@@ -1,25 +1,25 @@
 
-
 import { WorldConfig, StyleGuideVector } from '../types';
 import { getSettings } from '../services/settingsService';
 import { GENRE_TAGGING_SYSTEMS } from './genreTagging';
+import { SYSTEM_JAILBREAK, NSFW_GUIDE } from './decalPrompts';
 
 export const getResponseLengthDirective = (aiResponseLength?: string): string => {
     switch (aiResponseLength) {
         case 'Ngắn':
-            return "Phần tường thuật của bạn nên ngắn gọn nhưng vẫn có chiều sâu, hướng đến độ dài mục tiêu từ 500 đến 1200 từ.";
+            return "YÊU CẦU ĐỘ DÀI: Khoảng 600-700 từ. Tập trung vào hành động chính, lướt qua chi tiết môi trường. Nhịp độ nhanh.";
         case 'Trung bình':
-            return "Phần tường thuật của bạn phải chi tiết và có chiều sâu, hướng đến độ dài mục tiêu từ 750 đến 1600 từ.";
+            return "YÊU CẦU ĐỘ DÀI: Khoảng 750-1000 từ. Cân bằng giữa đối thoại và miêu tả. Không quá dài dòng nhưng đủ chi tiết.";
         case 'Chi tiết, dài':
-            return `Phần tường thuật của bạn phải CỰC KỲ CHI TIẾT, có chiều sâu và DÀI, hướng đến độ dài mục tiêu từ 1200 đến 2500 từ. Để đạt được độ dài và chất lượng yêu cầu, bạn PHẢI:
-- **Miêu tả đa giác quan:** Đi sâu vào mô tả môi trường, các chi tiết giác quan (âm thanh, mùi vị, hình ảnh, cảm giác).
-- **Khám phá nội tâm:** Dành thời gian mô tả chi tiết suy nghĩ, cảm xúc, và mâu thuẫn nội tâm của nhân vật chính và các NPC quan trọng.
-- **Hành động & Phản ứng của NPC:** Mô tả chi tiết hành động, cử chỉ, và phản ứng của các NPC, khiến họ trở nên sống động.
-- **Phát triển tình tiết:** Thay vì kết thúc cảnh sớm, hãy phát triển thêm các tình tiết phụ, các đoạn hội thoại, hoặc các mô tả chi tiết để làm giàu thêm cho diễn biến.
-- **CHỐNG LẶP LẠI (CỰC KỲ QUAN TRỌNG):** TUYỆT ĐỐI KHÔNG được lặp lại nội dung từ các lượt chơi trước chỉ để kéo dài độ dài. Mỗi câu chữ đều phải là nội dung mới, thúc đẩy câu chuyện tiến về phía trước hoặc làm sâu sắc thêm bối cảnh hiện tại.`;
+            return `YÊU CẦU ĐỘ DÀI: TỐI THIỂU 1200 TỪ (viết đến khi đạt giới hạn token). KỸ THUẬT VIẾT (Áp dụng triệt để):
+- **Chống Tóm Tắt (Anti-Summary):** TUYỆT ĐỐI KHÔNG tóm tắt diễn biến. Thay vì viết 'Anh ấy đi đến lâu đài', hãy miêu tả từng bước chân, tiếng gió, cảm giác mặt đường, và suy nghĩ của anh ấy trên đường đi.
+- **Phân rã Hành động (Micro-Actions):** Chia nhỏ một hành động thành 3-4 cử động chi tiết.
+- **Đa Giác Quan:** Bắt buộc mô tả đủ 5 giác quan (Thị, Thính, Khứu, Vị, Xúc) trong mỗi phân cảnh.
+- **Nội tâm nhân vật:** Đào sâu vào suy nghĩ (monologue) của nhân vật trước khi họ nói hoặc làm gì đó.
+- **Slow Pacing:** Giữ nhịp truyện chậm rãi, từ tốn. Nếu cốt truyện sắp hết ý, hãy miêu tả kỹ bối cảnh xung quanh hoặc flashback về quá khứ.`;
         case 'Mặc định':
         default:
-            return "Phần tường thuật của bạn phải chi tiết và có chiều sâu, hướng đến độ dài mục tiêu từ 750 đến 1600 từ.";
+            return "YÊU CẦU ĐỘ DÀI: Khoảng 750-1000 từ. Cân bằng giữa đối thoại và miêu tả. Không quá dài dòng nhưng đủ chi tiết.";
     }
 };
 
@@ -86,7 +86,8 @@ BẠN BẮT BUỘC PHẢI tuân thủ các quy tắc văn phong sau đây, chún
     genreConfig = GENRE_TAGGING_SYSTEMS['sci_fi'];
   }
 
-  let instruction = `${styleGuideInstruction}
+  let instruction = `${SYSTEM_JAILBREAK}
+${styleGuideInstruction}
 Bạn là một Quản trò (Game Master - GM) cho một game nhập vai text-based, với khả năng kể chuyện sáng tạo và logic. 
 Nhiệm vụ của bạn là dẫn dắt câu chuyện dựa trên một thế giới đã được định sẵn và hành động của người chơi.
 QUY TẮC BẮT BUỘC:
@@ -220,7 +221,8 @@ QUY TẮC BẮT BUỘC:
             - **Cú pháp:** \`[STAT_CHANGE: name="Sinh Lực", operation="add", amount=10]\`
     c.  **Kiểm tra Thuộc tính (Ngầm):** Bạn vẫn phải âm thầm so sánh Thuộc tính của nhân vật với độ khó hành động để quyết định kết quả (thành công/thất bại) trong lời kể, nhưng bạn KHÔNG cần báo cáo lại việc kiểm tra này trong các thẻ.
     
-${DEEP_SIMULATION_PROTOCOL}`;
+${DEEP_SIMULATION_PROTOCOL}
+${config.allowAdultContent ? NSFW_GUIDE : ''}`;
 
   if (genreConfig && !styleGuide) {
       // Replace the old generic tagging rule (rule #8) with the new genre-specific one
